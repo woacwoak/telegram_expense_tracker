@@ -10,12 +10,15 @@ from telegram.ext import (
 )
 from models import Expense, session
 from dotenv import load_dotenv
+from sqlalchemy import func
+from datetime import datetime
+
 import os
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
-MENU, ADD, REMOVE, LIST = range(4)
+MENU, ADD, REMOVE = range(3)
 
 
 
@@ -24,6 +27,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("Add expense", callback_data="add")],
         [InlineKeyboardButton("Remove expense", callback_data="remove")],
         [InlineKeyboardButton("List expenses", callback_data="list")],
+        [InlineKeyboardButton("Sum month", callback_data="sum_month")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -88,7 +92,7 @@ async def remove_expense(update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return REMOVE
     
 
-async def list_expenses(update, context) -> None:
+async def list_expenses_generator(update, context) -> None:
     user_id = update.effective_user.id
     expenses = session.query(Expense).filter_by(user_id=user_id).all()
 
@@ -107,6 +111,40 @@ async def list_expenses(update, context) -> None:
     text = "\n".join([f"{e.id} - €{e.amount} ({e.date})" for e in expenses])
     await message.reply_text(f"📝 Your expenses:\n{text}")
 
+async def list_expenses(update, context) -> int:
+    await list_expenses_generator(update, context)
+    return await show_menu(update, context)
+
+async def sum_month(update, context) -> None:
+    user_id = update.effective_user.id
+
+    now = datetime.now()
+    start_month = datetime(now.year, now.month, 1)
+
+    if now.month == 12:
+        end_month = datetime(now.year + 1, 1, 1)
+    else:
+        end_month = datetime(now.year, now.month + 1, 1)
+
+
+    total = (
+        session.query(func.sum(Expense.amount))
+        .filter(
+            Expense.user_id == user_id,
+            Expense.date >= start_month,
+            Expense.date < end_month
+        )
+        .scalar()
+    )
+
+    total = total or 0
+
+    await update.callback_query.message.reply_text(f"💰 This month total: €{total}")
+
+    return await show_menu(update, context)
+
+
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -117,7 +155,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD
     elif query.data == "remove":
-        await list_expenses(update, context)
+        await list_expenses_generator(update, context)
         await update.callback_query.message.reply_text(
             "✏️ Enter the ID of the expense you want to remove:"
         )
@@ -125,10 +163,14 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     elif query.data == "list":
         await query.edit_message_text("📝 Listing your expenses...")
         await list_expenses(update, context)
-        return LIST
-
-    await query.edit_message_text("Unknown option selected.")
-    return await show_menu(update, context)
+        return MENU
+    elif query.data == "sum_month":
+        await query.edit_message_text("🧮 Calculating your month expenses...")
+        await sum_month(update, context)
+        return MENU
+    else:
+        await query.edit_message_text("Unknown option selected.")
+        return await show_menu(update, context)
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Operation cancelled.")
@@ -150,7 +192,6 @@ def main():
             MENU: [CallbackQueryHandler(button)],
             ADD: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense)],
             REMOVE: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_expense)],
-            LIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, list_expenses)],
         },
         fallbacks=[CommandHandler("start", start)],
     )
